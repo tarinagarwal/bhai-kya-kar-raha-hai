@@ -1,0 +1,13 @@
+{
+  "name": "gemini-computer-use",
+  "version": "1.0.0",
+  "description": "Gemini Computer Use - AI Browser Agent",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  }
+}
