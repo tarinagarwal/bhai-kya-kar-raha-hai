@@ -159,3 +159,4 @@ def calc_press_sequence(hwnd: int, expression: str) -> bool:
         else:
             print(f"[UIA] Calculator: unknown char '{char}'")
     return True
+
