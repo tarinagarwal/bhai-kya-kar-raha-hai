@@ -20,3 +20,4 @@ uiautomation>=2.0.18
 google-cloud-firestore>=2.25.0
 google-cloud-speech>=2.34.0
 google-cloud-logging>=3.14.0
+
