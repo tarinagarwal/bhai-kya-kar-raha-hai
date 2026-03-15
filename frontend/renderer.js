@@ -275,6 +275,7 @@ function addActionItem(name, args) {
     run_shell_command: "💻",
     focus_window: "🪟",
     calculator_compute: "🔢",
+    desktop_action: "🖥️",
   };
   const time = new Date().toLocaleTimeString("en-US", {
     hour12: false,
@@ -337,8 +338,11 @@ function setRunning(running) {
 
 function updateMode() {
   const mode = modeSelect.value;
-  modeIndicator.textContent =
-    mode === "desktop" ? "🖥️ Desktop (Background)" : "🌐 Browser";
+  if (mode === "desktop") {
+    modeIndicator.textContent = "🖥️ Desktop (clawd-cursor)";
+  } else {
+    modeIndicator.textContent = "🌐 Browser (Playwright)";
+  }
 }
 
 function escapeHtml(text) {
@@ -349,8 +353,3 @@ function escapeHtml(text) {
 
 // Init
 connectWebSocket();
-
-
-
-
-

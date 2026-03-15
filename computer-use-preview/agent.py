@@ -407,10 +407,15 @@ class BrowserAgent:
             return "TERMINATE"
         return "CONTINUE"
 
-    def agent_loop(self):
+    def agent_loop(self, max_iterations: int = 50):
         status = "CONTINUE"
-        while status == "CONTINUE":
+        iteration = 0
+        while status == "CONTINUE" and iteration < max_iterations:
             status = self.run_one_iteration()
+            iteration += 1
+        if iteration >= max_iterations:
+            print(f"Agent loop hit max iterations ({max_iterations})")
+            self.final_reasoning = self.final_reasoning or "Reached maximum iterations."
 
     def denormalize_x(self, x: int) -> int:
         return int(x / 1000 * self._browser_computer.screen_size()[0])

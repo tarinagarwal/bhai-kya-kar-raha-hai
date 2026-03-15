@@ -34,7 +34,7 @@ PLAYWRIGHT_KEY_MAP = {
     "return": "Enter",  # Playwright uses 'Enter'
     "enter": "Enter",
     "shift": "Shift",
-    "control": "ControlOrMeta",
+    "control": "Control",
     "alt": "Alt",
     "escape": "Escape",
     "space": "Space",  # Can also just be " "

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gemini Computer Use</title>
+    <title>Bhai Kya Kar Raha Hai</title>
     <link rel="stylesheet" href="styles.css" />
     <link
       rel="stylesheet"
@@ -34,7 +34,7 @@
             </defs>
           </svg>
         </div>
-        <span class="titlebar-title">Gemini Desktop Agent</span>
+        <span class="titlebar-title">Bhai Kya Kar Raha Hai</span>
         <span class="titlebar-badge">AI Agent</span>
       </div>
       <div class="titlebar-controls">
@@ -79,7 +79,7 @@
             <span class="url-text" id="urlText">Desktop</span>
           </div>
           <div class="mode-indicator" id="modeIndicator">
-            🖥️ Desktop (Background)
+            🌐 Browser (Playwright)
           </div>
           <div class="panel-status" id="browserStatus">Waiting...</div>
         </div>
@@ -91,7 +91,7 @@
             </div>
             <p class="placeholder-text">Enter a query or use voice to start</p>
             <p class="placeholder-sub">
-              The desktop view will appear here in real-time
+              Browser or desktop view will appear here in real-time
             </p>
           </div>
           <img
@@ -176,6 +176,7 @@
             <label class="option-label">
               <span>Mode:</span>
               <select id="modeSelect" onchange="updateMode()">
+                <option value="browser">🌐 Browser</option>
                 <option value="desktop">🖥️ Desktop</option>
               </select>
             </label>
@@ -230,4 +231,3 @@
     <script src="renderer.js"></script>
   </body>
 </html>
-

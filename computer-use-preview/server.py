@@ -1,10 +1,9 @@
-"""WebSocket server — bridges Electron frontend to Desktop/Browser agent.
+"""WebSocket server — bridges Electron frontend to Browser/Desktop agent.
 
 Supports:
-- Full desktop control mode (pyautogui + Win32)
-- Browser-only mode (Playwright, legacy)
+- Browser mode (Playwright via Gemini Computer Use)
+- Desktop mode (proxied through clawd-cursor REST API)
 - Voice input via Google Cloud STT
-- Session memory via Firestore
 """
 import asyncio
 import json
@@ -13,49 +12,43 @@ import os
 import threading
 import time
 import queue
-import io
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import websockets
-from PIL import Image
 
 from agent import BrowserAgent
-from desktop_agent import DesktopAgent
-from computers import PlaywrightComputer, DesktopComputer, EnvState
-from screen_capture import WindowCapture
-from memory import SessionMemory
+from computers import PlaywrightComputer, EnvState
 from voice_input import VoiceTranscriber
+from clawd_bridge import ClawdBridge
 from google.genai.types import (
     FinishReason, FunctionResponse, Content, Part,
 )
 from google.genai import types
 
-SCREEN_SIZE = (1920, 1200)
-LIVE_FEED_FPS = 10
+PLAYWRIGHT_SCREEN_SIZE = (1440, 900)
+LIVE_FEED_FPS = 5
 
 
-class DesktopSession:
-    """Manages desktop agent lifecycle — captures full screen, runs agent."""
+class AgentSession:
+    """Manages agent lifecycle for both browser and desktop modes."""
 
     def __init__(self, ws, loop):
         self._ws = ws
         self._loop = loop
-        self._desktop: DesktopComputer | None = None
-        self._memory = SessionMemory()
         self._voice = VoiceTranscriber()
+        self._clawd = ClawdBridge()
         self._closed = False
         self._agent_running = False
         self._cmd_queue = queue.Queue()
+        self._playwright_env = None
 
-        # Start threads
+        # Worker thread for agent execution
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
-        self._feed_thread = threading.Thread(target=self._feed_loop, daemon=True)
-        self._feed_thread.start()
-        print(f"[SESSION] Created, memory session: {self._memory.session_id}")
+        print(f"[SESSION] Created")
 
     def _send(self, data):
         """Thread-safe send over async websocket."""
@@ -65,46 +58,6 @@ class DesktopSession:
             )
         except Exception as e:
             print(f"[WS ERROR] {e}")
-
-    def _feed_loop(self):
-        """Captures desktop screen and streams frames to frontend."""
-        interval = 1.0 / LIVE_FEED_FPS
-        frame_count = 0
-        target_w, target_h = SCREEN_SIZE
-
-        while not self._closed:
-            if self._desktop is not None:
-                try:
-                    raw = self._desktop._take_screenshot()
-                    if raw:
-                        b64 = base64.b64encode(raw).decode("utf-8")
-                        # Get current window title
-                        title = "Desktop"
-                        if self._desktop.focused_hwnd:
-                            try:
-                                import ctypes
-                                hwnd = self._desktop.focused_hwnd
-                                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                                buf = ctypes.create_unicode_buffer(length + 1)
-                                ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
-                                title = buf.value or "Desktop"
-                            except Exception:
-                                pass
-                        self._send({
-                            "type": "live_frame",
-                            "image": b64,
-                            "url": title,
-                        })
-                        frame_count += 1
-                        if frame_count == 1:
-                            print(f"[FEED] First frame sent ({len(raw)} bytes)")
-                        if frame_count % 200 == 0:
-                            print(f"[FEED] {frame_count} frames sent")
-                except Exception as e:
-                    if frame_count == 0:
-                        print(f"[FEED] Capture error: {e}")
-            time.sleep(interval)
-        print("[FEED] Loop ended")
 
     def _worker_loop(self):
         """Processes commands from the queue."""
@@ -118,34 +71,15 @@ class DesktopSession:
             action = cmd.get("action")
             print(f"[WORKER] Command: {action}")
 
-            if action == "init_desktop":
-                self._init_desktop()
-            elif action == "run_agent":
-                self._run_agent(cmd["query"], cmd["model"], cmd.get("mode", "desktop"))
+            if action == "run_agent":
+                self._run_agent(cmd["query"], cmd["model"], cmd.get("mode", "browser"))
             elif action == "shutdown":
                 break
 
         print("[WORKER] Ended")
 
-    def _init_desktop(self):
-        """Initialize the desktop computer interface."""
-        if self._desktop is not None:
-            return
-        self._send({"type": "thinking", "text": "Initializing desktop control (background mode)..."})
-        try:
-            self._desktop = DesktopComputer(
-                screen_size=SCREEN_SIZE,
-                capture_mode="desktop",
-                background_mode=True,  # Agent interacts without stealing focus
-            )
-            self._send({"type": "thinking", "text": "Desktop control ready — background mode active. You can keep working while the agent operates."})
-            print("[DESKTOP] Initialized (background mode)")
-        except Exception as e:
-            print(f"[DESKTOP] Init failed: {e}")
-            self._send({"type": "error", "message": f"Desktop init failed: {e}"})
-
-    def _run_agent(self, query: str, model: str, mode: str = "desktop"):
-        """Run the agent loop."""
+    def _run_agent(self, query: str, model: str, mode: str = "browser"):
+        """Run the agent loop in the appropriate mode."""
         if self._agent_running:
             self._send({"type": "error", "message": "Agent already running"})
             return
@@ -153,39 +87,104 @@ class DesktopSession:
         self._agent_running = True
 
         if mode == "desktop":
-            if self._desktop is None:
-                self._init_desktop()
-            if self._desktop is None:
-                self._send({"type": "error", "message": "Desktop not available"})
-                self._agent_running = False
-                return
+            self._run_desktop_agent(query)
+        else:
+            self._run_browser_agent(query, model)
 
-            self._send({"type": "thinking", "text": f"Starting desktop agent with `{model}`..."})
-            try:
-                agent = FrontendDesktopAgent(
-                    desktop=self._desktop,
+        self._agent_running = False
+
+    def _run_browser_agent(self, query: str, model: str):
+        """Run Playwright-based browser agent with Gemini Computer Use."""
+        self._send({"type": "thinking", "text": f"Starting browser agent with `{model}`..."})
+
+        try:
+            env = PlaywrightComputer(
+                screen_size=PLAYWRIGHT_SCREEN_SIZE,
+                initial_url="https://www.google.com",
+            )
+            with env as browser_computer:
+                self._playwright_env = browser_computer
+                agent = FrontendBrowserAgent(
+                    browser_computer=browser_computer,
                     query=query,
                     model_name=model,
-                    memory=self._memory,
                     ws_send=self._send,
                 )
                 agent.agent_loop()
                 result = agent.final_reasoning or "Task completed."
                 self._send({"type": "complete", "result": result})
-            except Exception as e:
-                print(f"[AGENT] Error: {e}")
-                import traceback
-                traceback.print_exc()
-                self._send({"type": "error", "message": str(e)})
-        else:
-            # Legacy browser mode
-            self._send({"type": "error", "message": "Browser mode deprecated. Use desktop mode."})
+        except Exception as e:
+            print(f"[AGENT] Browser error: {e}")
+            import traceback
+            traceback.print_exc()
+            self._send({"type": "error", "message": str(e)})
+        finally:
+            self._playwright_env = None
 
-        self._agent_running = False
+    def _run_desktop_agent(self, query: str):
+        """Run desktop agent via clawd-cursor REST API."""
+        self._send({"type": "thinking", "text": "Sending task to clawd-cursor desktop agent..."})
 
-    def start_agent(self, query: str, model: str, mode: str = "desktop"):
+        if not self._clawd.is_available():
+            self._send({"type": "error", "message": "clawd-cursor is not running. Start it with: clawdcursor start"})
+            return
+
+        try:
+            # Submit task to clawd-cursor
+            result = self._clawd.submit_task(query)
+            if not result.get("accepted"):
+                self._send({"type": "error", "message": result.get("error", "Task rejected by clawd-cursor")})
+                return
+
+            self._send({"type": "thinking", "text": "Task accepted by clawd-cursor. Monitoring progress..."})
+
+            # Poll status and stream screenshots
+            iteration = 0
+            while not self._closed:
+                time.sleep(1)
+                status = self._clawd.get_status()
+                agent_status = status.get("status", "idle")
+
+                # Stream screenshot
+                screenshot_b64 = self._clawd.get_screenshot()
+                if screenshot_b64:
+                    self._send({
+                        "type": "live_frame",
+                        "image": screenshot_b64,
+                        "url": status.get("currentStep", "Desktop"),
+                    })
+
+                # Update iteration
+                steps_done = status.get("stepsCompleted", 0)
+                if steps_done > iteration:
+                    iteration = steps_done
+                    self._send({"type": "iteration", "count": iteration})
+                    step_desc = status.get("currentStep", "")
+                    if step_desc:
+                        self._send({"type": "action", "name": "desktop_action", "args": {"step": step_desc}})
+
+                # Check if waiting for confirmation
+                if agent_status == "waiting_confirm":
+                    self._send({"type": "thinking", "text": "⚠️ clawd-cursor is waiting for confirmation. Auto-approving..."})
+                    self._clawd.confirm(True)
+
+                # Check if done
+                if agent_status == "idle" and iteration > 0:
+                    self._send({"type": "complete", "result": "Desktop task completed via clawd-cursor."})
+                    break
+
+                if agent_status not in ("idle", "thinking", "acting", "waiting_confirm", "paused"):
+                    self._send({"type": "error", "message": f"Unexpected agent status: {agent_status}"})
+                    break
+
+        except Exception as e:
+            print(f"[AGENT] Desktop error: {e}")
+            import traceback
+            traceback.print_exc()
+            self._send({"type": "error", "message": str(e)})
+
+    def start_agent(self, query: str, model: str, mode: str = "browser"):
         """Queue agent run."""
-        self._cmd_queue.put({"action": "init_desktop"})
         self._cmd_queue.put({"action": "run_agent", "query": query, "model": model, "mode": mode})
 
     def transcribe_audio(self, audio_data: bytes) -> str:
@@ -201,15 +200,14 @@ class DesktopSession:
         print("[SESSION] Closed")
 
 
-class FrontendDesktopAgent(DesktopAgent):
-    """Extends DesktopAgent to stream reasoning/actions to the frontend."""
+class FrontendBrowserAgent(BrowserAgent):
+    """Extends BrowserAgent to stream reasoning/actions to the Electron frontend."""
 
-    def __init__(self, desktop, query, model_name, memory, ws_send):
+    def __init__(self, browser_computer, query, model_name, ws_send):
         super().__init__(
-            desktop=desktop,
+            browser_computer=browser_computer,
             query=query,
             model_name=model_name,
-            memory=memory,
             verbose=False,
         )
         self._ws_send = ws_send
@@ -238,7 +236,7 @@ class FrontendDesktopAgent(DesktopAgent):
         reasoning = self.get_text(candidate)
         function_calls = self.extract_function_calls(candidate)
 
-        # Send reasoning
+        # Send reasoning to frontend
         if reasoning:
             self._ws_send({"type": "thinking", "text": reasoning})
 
@@ -253,52 +251,82 @@ class FrontendDesktopAgent(DesktopAgent):
             self.final_reasoning = reasoning
             return "COMPLETE"
 
-        # Execute actions
+        # Execute actions and send to frontend
         function_responses = []
         for fc in function_calls:
             args_dict = dict(fc.args) if fc.args else {}
             self._ws_send({"type": "action", "name": fc.name, "args": args_dict})
 
-            # Auto-acknowledge safety
-            if fc.name == "acknowledge_safety_decision":
-                function_responses.append(
-                    Part(function_response=FunctionResponse(
-                        name=fc.name,
-                        response={"decision": args_dict.get("safety_decision", "ACCEPT")},
-                    ))
-                )
-                continue
-
             try:
-                result = self.handle_action(fc)
+                fc_result = self.handle_action(fc)
             except Exception as e:
                 print(f"[AGENT] Action error ({fc.name}): {e}")
-                result = {"error": str(e)}
+                # On error, still get current state so Gemini has a screenshot
+                try:
+                    fc_result = self._browser_computer.current_state()
+                except Exception:
+                    fc_result = {"error": str(e)}
 
-            if isinstance(result, EnvState):
+            if isinstance(fc_result, EnvState):
+                # Stream the screenshot to frontend
+                screenshot_b64 = base64.b64encode(fc_result.screenshot).decode("utf-8")
+                self._ws_send({
+                    "type": "live_frame",
+                    "image": screenshot_b64,
+                    "url": fc_result.url,
+                })
+
                 function_responses.append(
                     Part(function_response=FunctionResponse(
                         name=fc.name,
-                        response={"url": result.url},
+                        response={"url": fc_result.url},
                     ))
                 )
                 function_responses.append(
                     Part(inline_data=types.Blob(
-                        mime_type="image/jpeg",
-                        data=result.screenshot,
+                        mime_type="image/png",
+                        data=fc_result.screenshot,
                     ))
                 )
             else:
                 function_responses.append(
                     Part(function_response=FunctionResponse(
                         name=fc.name,
-                        response=result if isinstance(result, dict) else {"result": str(result)},
+                        response=fc_result if isinstance(fc_result, dict) else {"result": str(fc_result)},
                     ))
                 )
 
         self._contents.append(Content(role="user", parts=function_responses))
+
+        # Prune old screenshots to keep context manageable
         self._prune_screenshots()
         return "CONTINUE"
+
+    def _prune_screenshots(self):
+        """Remove old screenshots, keeping only the most recent ones."""
+        MAX_RECENT = 3
+        screenshot_indices = []
+        for i in range(len(self._contents) - 1, -1, -1):
+            content = self._contents[i]
+            if not content.parts:
+                continue
+            for j in range(len(content.parts) - 1, -1, -1):
+                p = content.parts[j]
+                if hasattr(p, 'inline_data') and p.inline_data:
+                    screenshot_indices.append((i, j))
+
+        to_remove = screenshot_indices[MAX_RECENT:]
+        for content_idx, part_idx in sorted(to_remove, reverse=True):
+            content = self._contents[content_idx]
+            parts_list = list(content.parts)
+            parts_list.pop(part_idx)
+            self._contents[content_idx] = Content(
+                role=content.role,
+                parts=parts_list if parts_list else [Part(text="[screenshot removed]")]
+            )
+
+        if to_remove:
+            print(f"[AGENT] Pruned {len(to_remove)} old screenshots")
 
 
 # ── WebSocket handler ──
@@ -306,11 +334,11 @@ class FrontendDesktopAgent(DesktopAgent):
 async def handler(websocket):
     print(f"[WS] Client connected")
     loop = asyncio.get_event_loop()
-    session = DesktopSession(websocket, loop)
+    session = AgentSession(websocket, loop)
 
     try:
         async for message in websocket:
-            # Check if binary (audio data)
+            # Binary = audio data
             if isinstance(message, bytes):
                 print(f"[WS] Received audio: {len(message)} bytes")
                 transcript = session.transcribe_audio(message)
@@ -333,12 +361,11 @@ async def handler(websocket):
             if msg_type == "start":
                 query = data.get("query", "")
                 model = data.get("model", "gemini-3-flash-preview")
-                mode = data.get("mode", "desktop")
+                mode = data.get("mode", "browser")
                 print(f"[WS] Start: mode={mode}, model={model}, query={query[:60]}")
                 session.start_agent(query, model, mode)
 
             elif msg_type == "voice_data":
-                # Base64 encoded audio
                 audio_b64 = data.get("audio", "")
                 if audio_b64:
                     audio_bytes = base64.b64decode(audio_b64)
@@ -348,18 +375,6 @@ async def handler(websocket):
                         "text": transcript,
                     }))
 
-            elif msg_type == "list_apps":
-                if session._desktop:
-                    apps = session._desktop.list_open_apps()
-                    await websocket.send(json.dumps({
-                        "type": "app_list",
-                        "apps": [{"title": a["title"], "process": a["process"]} for a in apps],
-                    }))
-
-            elif msg_type == "close_browser":
-                # Legacy compat
-                pass
-
     except websockets.exceptions.ConnectionClosed:
         print("[WS] Client disconnected")
     finally:
@@ -368,15 +383,14 @@ async def handler(websocket):
 
 async def main():
     print("=" * 60)
-    print("  Desktop AI Agent Server")
+    print("  Gemini AI Agent Server")
     print("  WebSocket: ws://localhost:8765")
+    print("  Browser mode: Playwright + Gemini Computer Use")
+    print("  Desktop mode: clawd-cursor API bridge")
     print("=" * 60)
     async with websockets.serve(handler, "localhost", 8765, max_size=50 * 1024 * 1024):
-        await asyncio.Future()  # run forever
+        await asyncio.Future()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-

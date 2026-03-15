@@ -9,15 +9,6 @@ websockets
 Pillow
 pytest
 
-# Desktop control
-pyautogui>=0.9.54
-pywinauto>=0.6.9
-psutil>=5.9.0
-comtypes>=1.4.0
-uiautomation>=2.0.18
-
-# GCP services
-google-cloud-firestore>=2.25.0
+# GCP services (optional — voice input & session memory)
 google-cloud-speech>=2.34.0
-google-cloud-logging>=3.14.0
-
+google-cloud-firestore>=2.25.0

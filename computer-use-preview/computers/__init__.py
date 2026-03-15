@@ -13,7 +13,6 @@
 # limitations under the License.
 from .computer import Computer, EnvState
 from .playwright.playwright import PlaywrightComputer
-from .desktop.desktop import DesktopComputer
 
 # Lazy import for browserbase (optional dependency)
 try:
@@ -26,5 +25,4 @@ __all__ = [
     "EnvState",
     "BrowserbaseComputer",
     "PlaywrightComputer",
-    "DesktopComputer",
 ]
