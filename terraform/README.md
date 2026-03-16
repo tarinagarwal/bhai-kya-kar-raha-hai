@@ -67,14 +67,14 @@ terraform output
 
 ## Configuration Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `project_id` | GCP Project ID | (required) |
-| `region` | Deployment region | `us-central1` |
-| `cpu` | CPU allocation | `2` |
-| `memory` | Memory allocation | `2Gi` |
-| `max_instances` | Max Cloud Run instances | `10` |
-| `timeout` | Request timeout (seconds) | `3600` |
+| Variable        | Description               | Default       |
+| --------------- | ------------------------- | ------------- |
+| `project_id`    | GCP Project ID            | (required)    |
+| `region`        | Deployment region         | `us-central1` |
+| `cpu`           | CPU allocation            | `2`           |
+| `memory`        | Memory allocation         | `2Gi`         |
+| `max_instances` | Max Cloud Run instances   | `10`          |
+| `timeout`       | Request timeout (seconds) | `3600`        |
 
 ## Resources Created
 
@@ -85,11 +85,11 @@ terraform output
 
 ## Outputs
 
-| Output | Description |
-|--------|-------------|
-| `service_url` | HTTP URL of the deployed service |
-| `websocket_url` | WebSocket URL for frontend |
-| `docker_repository` | Artifact Registry URL |
+| Output              | Description                      |
+| ------------------- | -------------------------------- |
+| `service_url`       | HTTP URL of the deployed service |
+| `websocket_url`     | WebSocket URL for frontend       |
+| `docker_repository` | Artifact Registry URL            |
 
 ## Cleanup
 
